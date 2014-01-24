@@ -1,4 +1,3 @@
-
 PyTis LLC. v2.0 Public License
 ==============================
 
