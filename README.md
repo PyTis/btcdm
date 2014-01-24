@@ -1,8 +1,14 @@
 
 For more information about this project, please view: https://github.com/PyTis/btcdm/wiki
 
-Please review the license at http://www.PyTis.com/LICENSE/
 
+Please donate!  I am making this for our own project, which is SEVERLY underfunded, but will also benefit the community.
+
+I am sharing this, because I care about the community, and want to see it remain secure and free.
+
+I will post the script/program/daemon to github when I am done.  I am 1/2 way done, and 4 days in.
+
+BTC Address: 1NnZEPLmBEK2HryY4heeJQhQPB8LLbNiPe
 
 
 Below are 3 images describing not one, but two major security holes I found in bitcoind.  If the images do not explain the issue well, then I am sorry, let me know and I will try to explain them further to you, or enhance the images.  But don't think they do not exist.  I confirmed this with MANY pros in the bitcoin IRC channel on freenode.
@@ -19,4 +25,7 @@ After you see the 3 images that explain the problem (1st 2 show the 2 security h
 
 [![bitcoind daemon mediator high level overview](https://raw2.github.com/PyTis/btcdm/master/BitcoinDm.png)](https://raw2.github.com/PyTis/btcdm/master/BitcoinDm.png)
 
+My modified MPL known as our PyTis License can be summarized.  Don't copy and alter my software without leaving my name in the credits.  If you want to use it, go for it.  If you want to take it and run with it, changing it, adapting it, whatever, I don't care.  I just want to still be reconized as the original author, because I am.
+
+Please review the license at http://www.PyTis.com/LICENSE/
 
