@@ -6,7 +6,7 @@ Please donate!  I am making this for our own project, which is SEVERLY underfund
 
 I am sharing this, because I care about the community, and want to see it remain secure and free.
 
-I will post the script/program/daemon to github when I am done.  I am 1/2 way done, and 4 days in.
+Don't judge the code yet, this is a work in progress.  I will cleanup and comment when I get closer to a release.
 
 BTC Address: 1NnZEPLmBEK2HryY4heeJQhQPB8LLbNiPe
 
