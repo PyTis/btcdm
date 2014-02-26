@@ -1,0 +1,1904 @@
+#!/usr/bin/env python
+"""btcdm
+=====
+FIRST.  If you are new to PyTis programs, they all have a similar interface.  I write many of my programs in python.  I do not know how to write a man page.  To get help witha  program, type "program-name -h"  To view the full manual, type "program-name --help"  This will work very much like the man page.  It allows you to scroll up, down, search, etc.  About the only difference is the lack of BOLD text.
+
+This is an extreamly complex program.  For the full help page, use --help.  For further documentation, please visit: https://github.com/PyTis/btcdm
+
+This file has several parts, I like to keep my programs contained in one file usually.  I do not do this when coding applications, but I do do so for PyTis programs.  PyTis programs only have one library they reference, pytis.py.  So far, I have only ever found 2 third party libraries that I can't do without, and being as I have customized them, I do provide them as well in a pylib module.
+
+File organization:
+Exceptions
+UserWarnings
+decorators and closures
+tiny helpers, (one-off functions that do a tid bit of testing/maintnance,etc)
+Lexical Parser Class
+EncryptedConfig Class
+	Wallet CLI State Management
+	Bitcoin has an ADD USER command
+	Litecoin has an ADD USER command
+	In CLI mode, how would I show you the right help message?  Similarly to MySQL when you select a database ("use foo") you must select a cointype.  You can change back and forth, but help contexts are based on this.  Therefore it must be selected first.
+
+FileTesting
+FileModeChanging
+FileOwnershipChanging
+pre_run
+run
+program init, (__main__)
+
+For error code referneces, please see btcdm.help
+"""
+# XXX-TODO: Add in a curses IO reader and override the Input/Output handler, so we can allow the uparrow to retrieve previous commands, tabs to attempt auto-complete, and columns to select help words from, when displaying help.
+# view the holdontothisfornowforbtcdm folder, there are two files there to utilize to achive the above TODO
+
+log=None
+
+import re
+import os
+import grp
+import pwd
+import sys
+import copy
+import hmac
+import math
+import stat
+import shutil
+import getpass
+import optparse
+import cStringIO
+
+from hashlib import md5
+from Crypto import Random
+from pyDes import triple_des
+from datetime import datetime
+from Crypto.Cipher import AES
+from Crypto.Cipher import ARC4
+from Crypto.Cipher import XOR 
+from Crypto.Hash import SHA256, SHA512
+from base64 import b64encode, b64decode
+
+
+from pprint import pprint
+import pytis as PyTis
+from pylib import configobj as COBJ
+
+__curdir__ = os.path.abspath(os.path.dirname(__file__))
+__author__ = 'Josh Lee'
+__created__ = '12:36pm 01 Jan, 2014'
+__copyright__ = 'PyTis'
+__version__ = '0.2'
+__minimum_password_length__ = 10
+
+
+encrypted_config_filename = '%s.edb' % os.path.basename(os.path.abspath(sys.argv[0]))
+backup_filename = '%s.backup.edb' % os.path.basename(os.path.abspath(sys.argv[0]))
+
+_cli_cmd_list = {}
+_rpc_cmd_list = {}
+_php_cmd_list = {}
+
+_bitcoin_cmds = {'cli':{},'rpc':{},'php':{}}
+_litecoin_cmds = {'cli':{},'rpc':{},'php':{}}
+_zerocoin_cmds = {'cli':{},'rpc':{},'php':{}}
+
+def bitcoin(func):
+	global _bitcoin_cmds
+	global _cli_cmd_list
+	global _rpc_cmd_list
+	global _php_cmd_list
+
+	if _cli_cmd_list:
+		_bitcoin_cmds['cli'][_cli_cmd_list[0][0]] = _cli_cmd_list[0][1]
+	if _rpc_cmd_list:
+		_bitcoin_cmds['rpc'][_rpc_cmd_list[0][0]] = _rpc_cmd_list[0][1]
+	if _php_cmd_list:
+		_bitcoin_cmds['php'][_php_cmd_list[0][0]] = _php_cmd_list[0][1]
+	
+	return func
+
+def litecoin(func):
+	global _litecoin_cmds
+	global _cli_cmd_list
+	global _rpc_cmd_list
+	global _php_cmd_list
+
+	if _cli_cmd_list:
+		_litecoin_cmds['cli'][_cli_cmd_list[0][0]] = _cli_cmd_list[0][1]
+	if _rpc_cmd_list:
+		_litecoin_cmds['rpc'][_rpc_cmd_list[0][0]] = _rpc_cmd_list[0][1]
+	if _php_cmd_list:
+		_litecoin_cmds['php'][_php_cmd_list[0][0]] = _php_cmd_list[0][1]
+	
+	return func
+
+def zerocoin(func):
+	global _zerocoin_cmds
+	global _cli_cmd_list
+	global _rpc_cmd_list
+	global _php_cmd_list
+	
+	if _cli_cmd_list:
+		_zerocoin_cmds['cli'][_cli_cmd_list[0][0]] = _cli_cmd_list[0][1]
+	if _rpc_cmd_list:
+		_zerocoin_cmds['rpc'][_rpc_cmd_list[0][0]] = _rpc_cmd_list[0][1]
+	if _php_cmd_list:
+		_zerocoin_cmds['php'][_php_cmd_list[0][0]] = _php_cmd_list[0][1]
+
+def cli(cmd):
+	global _cli_cmd_list
+	_cli_cmd_list=[(cmd.__name__, cmd)]
+	return cmd
+	
+def rpc(cmd):
+	global _rpc_cmd_list
+	_rpc_cmd_list=[(cmd.__name__, cmd)]
+	return cmd
+
+def php(cmd):
+	global _php_cmd_list
+	_php_cmd_list=[(cmd.__name__, cmd)]
+	return cmd
+
+def microtime(dt=None):
+	""" simple microtime function that can take in a datetime timestamp to return
+	the microtime for, returns the microtime right now. """
+	dt = dt or datetime.now()
+	return (dt - datetime.utcfromtimestamp(0)).total_seconds()
+
+
+class BTCaddress(str):
+	""" Custom Bitcoin Address Verify-turend into a type for type-casting.
+	"""
+
+	address_pattern = "[a-zA-Z1-9]{27,35}$"
+	address_expr = re.compile(r"%s"%address_pattern)
+	__b58chars = '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz'
+	__b58base = len(__b58chars)
+	_valid = False
+	_version = None
+
+	def __new__(cls,val):
+		if val is None:
+			# allow None to be passed in, so that we may clear out bitcoin addresses
+			# if you want, youc an raise an error instead, so that None doesn't pass silently
+			inst = str.__new__(cls, None)
+			inst._valid = False
+			inst._version = None
+			return inst
+
+		# I don't know if there could be a valid address with no numbers, but just in-case
+		if isinstance(val, int): val = str(val) 
+
+		# remove preceading and trailing whitespace
+		if isinstance(val, basestring): 
+			val = val.strip() 
+			if not val:
+				# again, allow '' to be passed in, so that we may clear out bitcoin addresses
+				# if you want, you can raise an error instead, so that None doesn't pass silently
+				inst = str.__new__(cls, None)
+				inst._valid = False
+				inst._version = None
+				return inst
+			else:
+				if not cls.address_expr.match(val):
+					raise ValueError('Invalid Bitcoin address. Bad RE match r"%s".' % cls.address_pattern)
+				version = cls.getVersion(val)
+				if version is None:
+					raise ValueError('Invalid Bitcoin address. Version Missmatch: %r' % version)
+				else:
+					inst = str.__new__(cls, val)
+					inst._valid = True
+					inst._version = version
+					return inst
+		else:
+			raise TypeError('Invalid Bitcoin address. Not a string.')
+	
+	def __type__(self):
+		return "<type 'BTCaddress'>"
+
+	valid = property(lambda s: s._valid)
+	version = property(lambda s: s._version)
+
+	@classmethod
+	def getVersion(cls, strAddress):
+		""" Returns None if strAddress is invalid.	Otherwise returns integer version of address. """
+		addr = cls.b58decode(strAddress,25)
+		if addr is None: return None
+		version = addr[0]
+		checksum = addr[-4:]
+		vh160 = addr[:-4] # Version plus hash160 is what is checksummed
+		h3=SHA256.new(SHA256.new(vh160).digest()).digest()
+		if h3[0:4] == checksum:
+			return ord(version)
+		return None
+
+	@classmethod
+	def b58encode(cls, v):
+		""" encode v, which is a string of bytes, to base58.
+		"""
+		long_value = 0L
+		for (i, c) in enumerate(v[::-1]):
+			long_value += (256**i) * ord(c)
+		result = ''
+		while long_value >= cls.__b58base:
+			div, mod = divmod(long_value, cls.__b58base)
+			result = cls.__b58chars[mod] + result
+			long_value = div
+		result = cls.__b58chars[long_value] + result
+
+		# Bitcoin does a little leading-zero-compression:
+		# leading 0-bytes in the input become leading-1s
+		nPad = 0
+		for c in v:
+			if c == '\0': nPad += 1
+			else: break
+
+		return (cls.__b58chars[0]*nPad) + result
+
+	@classmethod
+	def b58decode(cls, v, length):
+		""" decode v into a string of len bytes
+		"""
+		long_value = 0L
+		for (i, c) in enumerate(v[::-1]):
+			long_value += cls.__b58chars.find(c) * (cls.__b58base**i)
+
+		result = ''
+		while long_value >= 256:
+			div, mod = divmod(long_value, 256)
+			result = chr(mod) + result
+			long_value = div
+		result = chr(long_value) + result
+
+		nPad = 0
+		for c in v:
+			if c == cls.__b58chars[0]: nPad += 1
+			else: break
+
+		result = chr(0)*nPad + result
+		if length is not None and len(result) != length:
+			return None
+
+		return result
+
+def clean(s):
+	""" For cleaning of strings passed in on the command line, either as opts or
+	as args.  Helps strip extra spaces, tabs, etc. and helps format None, empty 
+	lists, etc. as just an empty string: '' """
+	if type(s) is not type(str('')): return ''
+	if not s: return ''
+	return str(s).strip()
+
+def clower(s):
+	return clean(s).lower()
+
+def cli_cleaner(s):
+	""" This is used for removing extra whitespace, tabs, etc and returns an 
+	underscore delimited representation of what was passed in. """
+	return cli_clean(s).replace(' ','_')
+
+def cli_clean(s):
+	""" This is used for removing extra whitespace, tabs, etc and returns an 
+	single space delimited representation of what was passed in. """
+	cleaned = s.strip().replace("\s",' ').replace("\S",' ').replace("\t",' ')
+	while '  ' in cleaned:
+		cleaned = cleaned.replace('  ',' ')
+	return cleaned
+
+def encryptText(val,salt):
+	""" Un Reversable, SHA 512 bit encryption
+	val=rcpzqt
+	salt=bcase
+	output = f118778c0e6254da027b3150dd65c235f7fa16ba2df908b6da0b754433c50a83f6ed8c4ae9f2a1c213fcc95c2d692dbabbfc7bd3f273ce1cad6f24a94762a54e
+	"""
+# XXX-TODO:	I'd like to have the key and IV roate through the output, perhaps
+# as shown below.	 Then each time or each day it uses the next set, but all 
+# derived from the same 512bit SHA val/salt and all used for key/iv 256bit AES
+# Cipher-Block Chaining.
+	"""
+
+	Example below:
+
+						Key 1					 
+[f118778c0e6254da027b3150dd65c235]			 IV 1
+																[f7fa16ba2df908b6]						Key 2
+																								[da0b754433c50a83f6ed8c4ae9f2a1c2]		 IV 2
+																																								[13fcc95c2d692dba]						Key 3
+																																																[bbfc7bd3f273ce1cad6f24a94762a54e]
+			IV 3
+[f118778c0e6254da]						Key 4
+								[027b3150dd65c235f7fa16ba2df908b6]			 IV 4
+																								[da0b754433c50a83]						Key 5
+																																[f6ed8c4ae9f2a1c213fcc95c2d692dba]				IV 5
+																																																[bbfc7bd3f273ce1c]		Key 6 >>
+																																																								[ad6f24a94762a54e
+		<< Key 6
+ f118778c0e6254da]				IV 6
+								[027b3150dd65c235]						Key 7
+																[f7fa16ba2df908b6da0b754433c50a83]				IV7
+																																[f6ed8c4ae9f2a1c2]						Key 8
+																																								[13fcc95c2d692dbabbfc7bd3f273ce1c]				IV8
+																																																								[ad6f24a94762a54e]
+[f118778c0e6254da027b3150dd65c235f7fa16ba2df908b6da0b754433c50a83f6ed8c4ae9f2a1c213fcc95c2d692dbabbfc7bd3f273ce1cad6f24a94762a54e]
+	"""
+	s = SHA512.new()
+	h = hmac.HMAC(salt, digestmod = SHA512)
+	h.update(val)
+	return h.hexdigest()
+
+def encrypt_file(in_file, out_file, chunk_size, key, iv):
+	aes = AES.new(key, AES.MODE_CBC, iv)
+	in_file.seek(0)
+	while True:
+		chunk = in_file.read(chunk_size)
+		if len(chunk) == 0:
+			break
+		elif len(chunk) % 16 != 0:
+			chunk += ' ' * (16 - len(chunk) % 16)
+		out_file.write(aes.encrypt(chunk))
+	del key
+	del iv
+ 
+def decrypt_file(in_file, out_file, chunk_size, key, iv):
+	aes = AES.new(key, AES.MODE_CBC, iv)
+	in_file.seek(0) 
+	while True:
+		chunk = in_file.read(chunk_size)
+		if len(chunk) == 0:
+			break
+		out_file.write(aes.decrypt(chunk))
+	del key
+	del iv
+
+def locate_db(opts=None,encrypted_config_filename=encrypted_config_filename, \
+							backup_filename=backup_filename):
+
+	global __curdir__, log
+	opts_backup_filename = None
+	opts_filename = None
+
+	default_filename = os.path.abspath(os.path.join(PyTis.__configdir__, encrypted_config_filename))
+	default_backup_filename = os.path.abspath(os.path.join(PyTis.__configdir__, backup_filename))
+
+	if os.path.exists(default_filename):
+		if opts:
+			opts.filename=default_filename
+			opts.backup_filename=default_backup_filename
+		return default_filename,default_backup_filename 
+	if opts:
+		log.info("Default INI path :".ljust(36)+" %s\n not found, continuing search." % default_filename)
+
+	root_edb_path	= os.path.abspath('/etc/%s' % encrypted_config_filename)
+	if os.path.exists(root_edb_path):
+		opts_backup_filename = os.path.abspath(os.path.join(os.path.dirname(root_edb_path), backup_filename))
+		if opts:
+			opts.filename=root_edb_path
+			opts.backup_filename=opts_backup_filename
+		return root_edb_path, opts_backup_filename
+	if opts:
+		log.info("\nRoot INI path :".ljust(36)+" %s\n not found, continuing search." % root_edb_path)
+
+	user_edb_path = os.path.abspath(os.path.join(PyTis.homedir(),'etc/',encrypted_config_filename))
+	if os.path.exists(user_edb_path):
+		opts_backup_filename = os.path.abspath(os.path.join(os.path.dirname(user_edb_path), backup_filename))
+		if opts:
+			opts.filename=user_edb_path
+			opts.backup_filename=opts_backup_filename
+		return user_edb_path, opts_backup_filename
+	if opts:
+		log.info("\nUser home directory etc/ INI path :".ljust(36)+" %s\n  not found, continuing search." % user_edb_path)
+
+	local_filename = os.path.abspath(os.path.join(__curdir__, encrypted_config_filename))
+	if os.path.exists(local_filename):
+		opts_backup_filename = os.path.abspath(os.path.join(os.path.dirname(local_filename), backup_filename))
+		if opts:
+			opts.filename=local_filename
+			opts.backup_filename=opts_backup_filename
+		return local_filename,opts_backup_filename
+	if opts:
+		log.info("\nLocal INI path :".ljust(36)+" %s\n not found, GIVING UP." % local_filename)
+	
+	# setting to default, because none was found.
+	if opts:
+		warning = '"%s" could not be located!' % encrypted_config_filename
+		log.info('')
+		if opts:
+			opts.filename=default_filename
+			opts.backup_filename=default_backup_filename
+			log.warn("%s\n" % warning)
+		raise PyTis.FileNotFound(warning)
+	else:
+		if opts:
+			opts.filename=default_filename
+			opts.backup_filename=default_backup_filename
+		return default_filename, default_backup_filename
+
+def check_setup(opts,args):
+	""" This will simply ensure that this program has already been installed, if it has not, then it will return false, else true.
+"""
+	try:
+		locate_db(opts)
+	except PyTis.FileNotFound, e:
+		return False
+	else:
+		return True
+
+def test_mode(path,mode):
+	global log
+	if (os.path.isdir(path) or os.path.isfile(path)) and os.path.exists(path):
+		if str(oct(stat.S_IMODE(os.stat(path).st_mode))) != str(mode):
+			log.warn('Incorrect chmod on: %s, mode should be "%s" and is "%s."' % (path,mode,str(oct(stat.S_IMODE(os.stat(path).st_mode)))))
+			return False
+	return True
+
+def test_ownership(path,current_owner,current_group):
+	global log
+	stat_info = os.stat(path)
+	uid = stat_info.st_uid
+	gid = stat_info.st_gid
+	user = pwd.getpwuid(uid)[0]
+	group = grp.getgrgid(gid)[0]
+	ret_val = True
+	if current_owner != user:
+		log.warn('Incorrect owner on: %s, user should be "%s" and is "%s."' % (path,current_owner,user))
+		ret_val = False
+	if current_group != group:
+		log.warn('Incorrect group on: %s, group should be "%s" and is "%s."' %  (path,current_group,group))
+		ret_val = False
+	return ret_val
+
+def test_setup(opts,args):
+	"""
+"""
+	global log
+	edb_dir = os.path.abspath(os.path.dirname(opts.filename))
+	edb_file = os.path.abspath(opts.filename)
+	ini_file = os.path.abspath(os.path.join(edb_dir,'btcdm.ini'))
+	ret_val = True
+	if not test_mode(edb_dir,'0400'):
+		ret_val = False
+	if not test_mode(edb_file,'0400'):
+		ret_val = False
+	if not test_mode(ini_file,'0400'):
+		ret_val = False
+	cuid = os.getuid()
+	cgid = os.getgid()
+	cuser = pwd.getpwuid(cuid)[0]
+	cgroup = grp.getgrgid(cgid)[0]
+	if not test_ownership(edb_dir,cuser,cgroup):
+		ret_val = False
+	if not test_ownership(edb_file,cuser,cgroup):
+		ret_val = False
+	if not test_ownership(ini_file,cuser,cgroup):
+		ret_val = False
+	return ret_val
+
+def correct_permissions(opts,args):
+	global log
+	edb_dir = os.path.abspath(os.path.dirname(opts.filename))
+	edb_file = os.path.abspath(opts.filename)
+	ini_file = os.path.abspath(os.path.join(edb_dir,'btcdm.ini'))
+	log.pause()
+	if not test_mode(edb_dir,'0400'):
+		os.chmod(edb_dir,0400)
+	if not test_mode(edb_file,'0400'):
+		os.chmod(edb_file,0400)
+	if not test_mode(ini_file,'0400'):
+		os.chmod(ini_file,0400)
+	cuid = os.getuid()
+	cgid = os.getgid()
+	cuser = pwd.getpwuid(cuid)[0]
+	cgroup = grp.getgrgid(cgid)[0]
+
+	if not test_ownership(edb_dir,cuser,cgroup):
+		os.chown(edb_dir,cuid,cgid)
+	if not test_ownership(edb_file,cuser,cgroup):
+		os.chown(edb_file,cuid,cgid)
+	if not test_ownership(ini_file,cuser,cgroup):
+		os.chown(ini_file,cuid,cgid)
+	log.unPause()
+
+def pre_run(opts,args,installation_type):
+	"""btcdm pre-run doc help"""
+	global log
+	if not check_setup(opts,args):
+		# ask
+		question = "Is this your first time running btcdm?\n\nPress 'Y' to install, or 'q' to exit and attempt to manually locate."
+		helptext = ''
+		input_options = ['Y','N','q']
+		option_always = []
+
+		helptext = "\nYou can cancelled setup.	If you believe it was already " \
+			"installed, please locate the btcdm.edb file, it should be placed in " \
+			"one of the paths listed above.\nIf you simply want to learn more " \
+			"first, remember that btcdm \"--help\" is differnet than " \
+			"\"btcdm -h\",...	\"btcdm --help\" will show a full manual, similar " \
+			"to a man page."
+
+		# getInputYN(question, helptext='No help for this command',input_options=__input_options__,option_always=__option_always__):
+		ask = PyTis.getInputYN(question=question, helptext=helptext,input_options=input_options, option_always=option_always)
+
+		if ask:
+			log.info("CREATING FILE>> %s" % opts.filename)
+			first_setup(opts,args)
+			log.info("Setup complete.	You may now begin using btcdm")
+			sys.exit(0)
+		else:
+			log.info(('-'*80))
+			warning = PyTis.tolen("If you believe it was already installed, please locate the btcdm.edb file, it should be placed in one of the paths listed above.",70)
+			warning+= PyTis.tolen("\nUse \"btcdm --help\" to view the full manual.")
+			log.info('')
+			log.warn(warning)
+			raise PyTis.QuitNow()
+	else:
+		#if installation_type in ('1','3') and opts.password:
+		#	raise PyTis.ArgumentError("A password may not be passed in on the command line, with this installation setup.")
+
+		if installation_type == '3':
+			cfile = PyTis.ConfigFile(opts)
+			opts.username=cfile.config.get('username',None)
+			opts.password=cfile.config.get('password',None)
+
+		if installation_type == '1':
+			if not str(opts.username).strip():
+				opts.username = getpass.getuser()
+			while True:
+				try:
+					opts.password = getpass.getpass('%s Password: ' % opts.username)
+					if len(opts.password) < __minimum_password_length__:
+						log.warn("\nThe password must be at least %s characters long." % __minimum_password_length__)
+						log.info("Please try again, the password is too short.")
+						opts.password=password=''
+					elif (opts.password.startswith(' ') or opts.password.endswith(' ')) or \
+							 (opts.password and len(opts.password.strip()) != len(opts.password)):
+						log.warn("\nThe password may not start, or end with a space, or tab, " \
+										"and must be at least %s characters long." % \
+										__minimum_password_length__)
+						log.info("Please try again.")
+						opts.password=''
+					else:
+						break
+				except KeyboardInterrupt, e:
+					log.info("KeyboardInterrupt (CTRL+C pressed) bye!")
+					log.info("bye!")
+					sys.exit(0)
+				except EOFError, e:
+					log.info("EOFError (CTRL+D pressed) bye!")
+					log.info("bye!")
+					sys.exit(0)
+
+		if installation_type == '2':
+			if opts.password and int(len(str(opts.password).strip())) < int(__minimum_password_length__):
+				raise PyTis.ArgumentError("The provided password is too short.")
+
+			if not str(opts.username).strip():
+				opts.username = getpass.getuser()
+			while True:
+				if opts.password and int(len(opts.password)) > int(__minimum_password_length__):
+					break # we were provided one on the command line
+				try:
+					opts.password = getpass.getpass('%s Password: ' % opts.username)
+					if len(opts.password) < __minimum_password_length__:
+						log.warn("\nThe password must be at least %s characters long." % __minimum_password_length__)
+						log.info("Please try again, the password is too short.")
+						opts.password=password=''
+					elif (opts.password.startswith(' ') or opts.password.endswith(' ')) or \
+							 (opts.password and len(opts.password.strip()) != len(opts.password)):
+						log.warn("\nThe password may not start, or end with a space, or tab, " \
+										"and must be at least %s characters long." % \
+										__minimum_password_length__)
+						log.info("Please try again.")
+						opts.password=''
+					else:
+						break
+				except KeyboardInterrupt, e:
+					log.info("KeyboardInterrupt (CTRL+C pressed) bye!")
+					log.info("bye!")
+					sys.exit(0)
+				except EOFError, e:
+					log.info("EOFError (CTRL+D pressed) bye!")
+					log.info("bye!")
+					sys.exit(0)
+
+		if not test_setup(opts,args):
+			# explain
+			# now ask
+			# getInputYN(question, helptext='No help for this command',input_options=__input_options__,option_always=__option_always__):
+			ask = PyTis.getInputYN("Should we attempt to fix the permissions for you?",option_always=[])
+			# ask if auto correct?
+			if ask:
+				# attempt auto correct
+				correct_permissions(opts,args)
+			else:
+				if installation_type == '3':
+					raise PyTis.QuitNow("This application cannot run with the current permissions, they are unsecure.")
+
+		try:
+			cfile = EncryptConfig(opts,opts.filename)
+		except PyTis.IdiotError, e:
+			log.error(str(e))
+			sys.exit(1)
+		else:
+			cfile.load()
+			return cfile
+		'''
+		pprint(cfile.config)
+		print '_bitcoin_cmds'
+		pprint(cfile._bitcoin_cmds)
+		print '_litecoin_cmds'
+		pprint(cfile._litecoin_cmds)
+		'''
+
+def run(opts,args,edb):
+	"""btcdm run doc help"""
+	print 'starting config'
+	pprint(edb.config)
+	if opts.force:
+		edb.releaseLock()
+	if opts.cli:
+		edb.enterCli(opts,*args)
+
+# XXX-TODO: when done, move post_run to here
+
+def first_setup(opts,args):
+	"""
+	XXX-TODO fix this
+If this is your first time installing btcdm please remember this.
+btcdm -h -> short, simple help
+btcdm --help --> Full man page, I do not know how to install or create a man page, but my python library displays the full help in a very similar manor that allows searching, etc.
+
+There are three options for installing btcdm. 
+=============================================
+
+** IF YOU READ NOTHING ELSE IN THIS INSTALLATION MANUAL, MAKE SURE YOU READ 
+THIS SECTION IN ITS INTIRETY. ***
+
+	Depending on your server setup, recommendations cannot be made between
+	Option 2 or Option 3, they each have distinct differences. Option 1 will 
+	always be the most secure, however it comes with one drawback.
+	It will be the administrators job to make that decision.	We provide no
+	Gaurentee or Warenty of any kind.	
+	
+It is up to you to decide which can be kept most secure, and choose from 
+between the 3.
+
+OPTION[1]:	Most secure, but more with a draw back.
+	btcdm.edb -	encrypted database, installed by the bitcoin daemon mediator
+
+	The drawback is that it cannot be started automatically.	
+	The username and password ARE NOT STORED, anywhere.	
+	Additionally, the password is not permitted to be supplied as arguments,
+	so command "btcdm -uroot -pMyPassword start" would not work.
+	
+	This is so that even if a threat gains physical, root access to your server,
+	they will never be able to decrypt the database.	
+
+	Not even from reading your .bash_history file.	After starting btcdm and 
+	being prompted, the user must manually type in the password.
+
+OPTION[2]:	Less secure, but still the password is not stored on the server.
+	btcdm.edb -	encrypted database, installed by the bitcoin daemon mediator
+
+	The password may be provided as an argument, so that cronjobs, etc, may start
+	this service.	Depending on which user this is ran as, and if you are using 
+	shell vs bash, and depending on if you have bash history logging turned on
+	and off will make the difference.	If I were to start bctdm from the command 
+	line as root,	while providing the password on this debian server, that entire
+	command would end up as a line in the /root/.bash_history file.
+
+OPTION[3]:	The choice I will likely use.
+	btcdm.edb -	encrypted database, installed by the bitcoin daemon mediator
+	btcdm.ini -	configuration file, installed by the bitcoin daemon mediator
+
+	In this option, the username and password used to encrypt the database are
+	stored in an ini file.	While this may seem terrible, it is no different
+	than the root password of a MySQL server being stored in the my.conf file.
+
+	The benifit over Option 2 is that this program while installing will ensure
+	that the installation directory, and files are not readable by other users
+	by setting the owner, group and mode of the files.	Additionally, btcdm will 
+	check these permissions each time it starts.	If it finds that the ini file
+	is readable by other users, it will warn you.	
+
+	For Option 3 to work correctly, btcdm must be installed, and ran as root.
+	
+## the below text needs fixed
+Additional notes, my partners and I discussed these options in great detail.	If you are selecting option 2 or 3, technically the username and password will be located on your server.	If you install this as a common user, root still has access to read your files right?	So why encrypt the database at all?	Simple, because if you are paying for hosting on a shared server, shared VPS, or even if you have your own server, if someone gains access as a user, not root, but still gains access, then perhaps they will be able to read your files, but not execute them.	We look at it as why not let it stay encrypted, it is still a little extra protection.	However, that being said, in all 3 options, I recommend you install this as root.	
+	"""
+	global __minimum_password_length__, log
+	installation_question = """
+OPTION[1]:	Most secure, password prompted
+
+OPTION[2]:	password passed
+
+OPTION[3]:	password stored
+
+It is up to you to decide which can be kept most secure, and choose from 
+between the 3.  Run "btcdm --help" to view the full manual, and for more
+information.
+
+Choose installation type: """
+	shorter_help = """
+It is up to you to decide which can be kept most secure, and choose from 
+between the 3.  Run "btcdm --help" to view the full manual, and for more
+information.
+
+OPTION[1]:	Most secure, but more with a draw back.
+	btcdm.edb -	encrypted database, installed by the bitcoin daemon mediator
+
+OPTION[2]:	Less secure, but still the password is not stored on the server.
+	btcdm.edb -	encrypted database, installed by the bitcoin daemon mediator
+
+OPTION[3]:	The choice I will likely use.
+	btcdm.edb -	encrypted database, installed by the bitcoin daemon mediator
+	btcdm.ini -	configuration file, installed by the bitcoin daemon mediator
+
+	"""
+
+
+	PyTis.clearScreen()
+	try:
+		locate_db(opts)
+	except PyTis.FileNotFound, e:
+		pass
+
+	while True:
+		installation_type = PyTis.getInput(question=installation_question,
+			helptext=shorter_help,
+			example_or_hint='1/2/3', default=None,required=True)
+		if installation_type not in ['1','2','3']:
+			log.warn("Invalid option")
+			continue
+		else:
+			break
+
+
+	current_user = getpass.getuser()
+	current_user_login = pwd.getpwuid(os.getuid())[0]
+	if not current_user: pwd.getpwuid(os.getuid()).pw_name
+	default_user = opts.username or current_user
+
+
+	PyTis.clearScreen()
+	while True:
+		opts.username = PyTis.getInput(question='Administrative User',
+			helptext='Please type the name for the Administrative user account, to manage btcdm.  Run "btcdm --help" to view the full manual, and for more information.',
+			#helptext=first_setup.__doc__,
+			example_or_hint='', default=default_user,required=True)
+		if clower(opts.username) == 'root':
+
+			 # getInputYN(question, helptext='No help for this command',input_options=__input_options__,option_always=__option_always__):
+			if PyTis.getInputYN(question="Are you sure you want to install this as the root user?",
+				helptext="There are no known security issues at this time, but because there potentially "+
+								 "could be, we do not recommend this.	Instead, we recommend that you create a "+
+								 "new btcdm user, su to that user, and set this up to run as them.	This could "+
+								 "help to prevent any unforeseen exploits that may arise in the future.",
+				option_always=[]):
+				break
+			else:
+				continue 
+		if opts.username and opts.username.strip(): 
+			break
+
+	log.debug("Collected username: %s" % opts.username)
+
+	#PyTis.clearScreen()
+	while True:
+		if opts.password and int(len(opts.password)) > int(__minimum_password_length__):
+			break # we were provided one on the command line
+
+	#	PyTis.clearScreen()
+		try:
+			opts.password = getpass.getpass('Administrative Password: ')
+			if opts.password == getpass.getpass('Confirm Password: '):
+				if len(opts.password) < __minimum_password_length__:
+					log.warn("\nThe password must be at least %s characters long." % __minimum_password_length__)
+					log.info("Please try again, the password is too short.")
+					opts.password=password=''
+				elif (opts.password.startswith(' ') or opts.password.endswith(' ')) or \
+						 (opts.password and len(opts.password.strip()) != len(opts.password)):
+					log.warn("\nThe password may not start, or end with a space, or tab, " \
+									"and must be at least %s characters long." % \
+									__minimum_password_length__)
+					log.info("Please try again.")
+					opts.password=password=''
+				else:
+					break
+			else:
+				opts.password=password=''
+				log.info("Passwords do not match, please try again.")
+		except KeyboardInterrupt, e:
+			log.info("KeyboardInterrupt (CTRL+C pressed) bye!")
+			log.info("bye!")
+			sys.exit(0)
+		except EOFError, e:
+			log.info("EOFError (CTRL+D pressed) bye!")
+			log.info("bye!")
+			sys.exit(0)
+
+	if opts.password:
+		if len(opts.password) < 12:
+			fakepass = '*'*12
+		else:
+			fakepass="%s" % ('*'*len(opts.password))
+	else:
+		log.error("%(prog_name)s could not find the password.")
+		sys.exit(1)
+	
+	log.debug("Collected password: %s" % fakepass)
+
+	
+
+	uid = os.getuid()
+	gid = os.getgid()
+	if current_user != opts.username:
+		question = 'Installing as user: "%s" (type ? to see why this is different than your supplied username)' % current_user
+		helptext = 'This is installing for user: "%s" (%s), and not "%s."  "%s" is simply the username that you must provide to launch this program.  If you are not okay with this, please switch users before installing.' % (current_user, current_user_login, opts.username, opts.username)
+		if not PyTis.getInputYN(question,helptext,option_always=[]):
+			raise PyTis.QuitNow()
+
+
+
+	edb_dir = os.path.abspath(os.path.dirname(opts.filename))
+	edb_file = opts.filename
+	ini_file = os.path.abspath(os.path.join(edb_dir,'btcdm.ini'))
+	
+	if not os.path.isdir(edb_dir) or not os.path.exists(edb_dir):
+		os.makedirs(edb_dir)
+
+	os.chmod(edb_dir,0400)
+	os.chown(edb_dir,uid,gid)
+	
+	if installation_type == '1':
+		#only create the edb
+
+		edbobj = EncryptConfig(opts,edb_file)
+		edbobj.IT = installation_type
+		edbobj.save()
+		os.chmod(edb_file,0400)
+		os.chown(edb_file,uid,gid)
+		return
+	elif installation_type == '2':
+		# create edb, now how do we determin that
+		# the password may come in via an opt?
+		edbobj = EncryptConfig(opts,edb_file)
+		edbobj.IT = installation_type
+		edbobj.save()
+
+	else: # installation_type == '3':
+		# create the ini and edb,
+		edbobj = EncryptConfig(opts,edb_file)
+		edbobj.IT = installation_type
+		edbobj.save()
+		os.chmod(edb_file,0400)
+		os.chown(edb_file,uid,gid)
+		# ini to contain user, and password 
+		cfile = PyTis.ConfigFile(opts)
+		cfile.fields = ['username','password']
+		try:
+			cfile.saveConfig(opts)
+		except OSError, e:
+			log.error(str(e))
+			sys.exit(1)
+		else:
+			os.chmod(ini_file,0400)
+			os.chown(ini_file,uid,gid)
+
+	return
+def dosort(dicttohash):
+	d={'cli':{},'rpc':{},'php':{}}	
+	d['cli'] = dicttohash['cli'].items()
+	d['cli'].sort()
+	d['rpc'] = dicttohash['rpc'].items()
+	d['rpc'].sort()
+	d['php'] = dicttohash['php'].items()
+	d['php'].sort()
+	return d
+
+class LegicalParser(object):
+	pass
+
+class EncryptConfig(PyTis.ConfigFile): 
+	_cbuff_enc = None
+	_cbuff_dec = None
+
+	cli_cmd_list = {}
+	rpc_cmd_list = {}
+
+	# Generated on init, this is a list of tuples, each mappable to a corresponding method.  This is used again by the lexical parser, rather than regenerating, being as it requires a nested loop to generate the first time.
+	bitcoin_cli_cmd_tups  = [] # Generated on init, this is a list of tuples
+	litecoin_cli_cmd_tups = [] # Generated on init, this is a list of tuples
+	zerocoin_cli_cmd_tups = [] # Generated on init, this is a list of tuples
+
+	_current_wallet = None # state management, see Wallet CLI State Management for more.
+
+	_it = 0 # installation type
+
+	_microtime = None
+
+	def set_current_wallet(self,wallet):
+		self._current_wallet = wallet
+	def get_current_wallet(self):
+		return self._current_wallet
+	current_wallet = property(get_current_wallet,set_current_wallet)
+	
+	def set_it(self,i):
+		self._it = i
+	def get_it(self):
+		return self._it
+	IT = property(get_it,set_it)
+
+	def set_microtime(self, mct=microtime()):
+		self._microtime=mct 
+	def get_microtime(self):
+		if not self._microtime:
+			self.set_microtime()
+		return self._microtime
+	mytime = property(get_microtime, set_microtime)
+
+	def set_filename(self, fname):
+		self._filename=fname 
+	def get_filename(self):
+		return self._filename
+	filename = property(get_filename, set_filename)
+	# end properties
+	# ###########################################################################
+
+	def __init__(self, opts=None, edbpath=None):
+		global _bitcoin_cmds, _litecoin_cmds, _zerocoin_cmds
+
+
+		self._bitcoin_cmds=dosort(_bitcoin_cmds)
+		self._litecoin_cmds=dosort(_litecoin_cmds)
+		self._zerocoin_cmds=dosort(_zerocoin_cmds)
+
+		if edbpath is not None and not opts.filename:
+			self.filename = os.path.abspath(edbpath)
+		elif edbpath is None and not opts.filename:
+			raise PyTis.NoFiles("The database file path was blank.") 
+
+		if opts:
+			self.fields = opts.__dict__.keys()
+			self.opts = opts
+			self.current_wallet=opts.wallet_type
+			#self.opts = dict(opts.__dict__.items())
+
+		self.onInitCommandTest()
+
+		if self.exists:
+#			self.config = self.getConfig(True)
+			pass
+
+	def releaseLock(self):
+		self.config['locked']=False
+		self._save()
+		return self.config['locked']
+
+	def poll(self,topoll,t=0.25):
+		global log
+
+		from time import sleep
+		if t>60:
+			log.debug('ProgrammingError')
+			raise PyTis.ProgrammingError("%s is too long to poll for." % t)
+		assert float(t)
+		sleep(t)
+		while not topoll():
+			continue
+		return True
+
+	def aquireLock(self):
+		global log
+		return self.poll(self._aquireLock,0.2)
+
+
+	def _aquireLock(self):
+		global log
+		state = EncryptConfig(self.opts,self.opts.filename)
+		state.load()
+
+
+		if PyTis.mbool(state.config.get('locked'),False):
+			
+			return False
+		else:
+			self.config['locked']=True
+			self._save()
+			print 'STATE IS: %s' % state.config.get('locked'),False
+			print 'CONFIG IS: %s' % self.config.get('locked'),False
+			return True
+
+	def command_from_wallet(self, command, wallet_type=None):
+		if not wallet_type: wallet_type=self.current_wallet
+		if wallet_type:
+			iterable = getattr(self,'_%s_cmds'%wallet_type)
+			for k,v in iterable['cli']:
+				if k == command:
+					return (k,v)
+			log.warn('None Found, error in lookup')
+		else:
+			log.error('Current wallet not set!')
+		return None
+
+	def onInitCommandTest(self):
+		# XXX-TODO: run through the commands and ensure no two have the same first text,
+# example command "add" would be confused with command "add user".
+		for w in ('bitcoin','litecoin','zerocoin'):
+			name_list = []
+			iterable = getattr(self,'_%s_cmds'%w)
+
+			for k,v in iterable['cli']:
+				name_list.append( tuple(k.upper().split('_')) )
+			name_list.sort()
+			setattr(self,'%s_cli_cmd_tups' % w,name_list)
+
+			for testme in name_list:
+				for against in name_list:
+					if len(testme) < len(against):
+						if testme == against[:len(testme)]:
+							little = ' '.join(testme).upper()
+							big = ' '.join(against).upper()
+							raise PyTis.IdiotError('The programmer has created a function that would break the lexical parser.  Command "%s" is IN command "%s"' % (little, big))
+
+	def generateCliHelp(self,command=None):
+		if command:
+			if not self.current_wallet:
+				print 'ERROR: No current wallet set, type "USE (coin/wallet type)" to select a type first.'
+				print 'ACCEPTEABLE coin/wallet types:'
+				print 'bitcoin, litecoin, zerocoin'
+				print
+			else:
+				command_from_wallet = self.command_from_wallet(str(cli_cleaner(command)).lower())
+				if command_from_wallet:
+					name,func=command_from_wallet
+					if func.__doc__:
+						print
+						print command.upper(), 'HELP:'
+						print
+						print func.__doc__
+						print
+					else:
+						print 'NO HELP FOUND FOR "%s"' % command.upper()
+			return
+		else:
+			print 
+			print "HELP:"
+			print "USE HELP {command} to view detailed help for that command"
+			print 
+			print 'Bitcoin Commands'
+			print '================'
+			for k,v in self._bitcoin_cmds['cli']:
+				print k.replace('_',' ').upper()
+			print 
+			print 'Litecoin Commands'
+			print '================'
+			for k,v in self._litecoin_cmds['cli']:
+				print k.replace('_',' ').upper()
+			print 
+	
+	def interpretCliCommand(self,commands):
+		""" Each line can work as a command.  I choose the double return to run commands 
+so that a single return could be used.  Why?  To create a sense of 
+transactions.  Lets take a look at an example:
+	bitcoin>>> ADD USER joe
+	bitcoin>>>
+
+Now pressing enter again, allows the above to run.  But what if you want to run
+a few commands as one transaction?
+	bitcoin>>> ADD USER joe
+	bitcoin>>> ADD USER jim
+	bitcoin>>> LIST USERS
+	bitcoin>>>
+
+The commands are first given to the lexical parser as lines as seen below.
+	command ['add', 'user', 'joe']
+	command ['add', 'user', 'jim']
+	command ['list', 'users']
+
+The parser would turn those lines into:
+	ADD USER 'joe'
+	ADD USER 'jim'
+	LIST USERS
+
+Then, it would map these lines, one by one:
+[ ('add_user', <function add_user at 0x1ceecf8> args='joe'), 
+  ('add_user', <function add_user at 0x1ceecf8> args='jim'), 
+	('list_users', <function list_users at 0x1e38ed8> args=None) ]
+
+Finally, this will attempt to run this list of commands.  If any were to fail,
+it simply does not save the writes to the encrypted database, instead it would
+call self.reload().  If they all succeed, it would save it's changes, thus we 
+have an easy to build transaction. 
+	"""
+		global log
+		tups = getattr(self,'%s_cli_cmd_tups'%self.current_wallet)
+		dosave = False
+		for command in commands:
+			command_str = str(' '.join(command)).strip()
+			command = command_str.split()
+			command_copy = copy.copy(command)
+			tryme = []
+			testme = ()
+			command_copy.reverse()
+			while command_copy:
+				word = command_copy.pop()
+				tryme.append(cli_clean(word).upper())
+				testme = tuple(tryme)
+				if testme in tups:
+					built = cli_cleaner(' '.join(tryme).lower())
+					name,func = self.command_from_wallet(built)
+					log.debug('name: %s' % name)
+					log.debug('func: %s' % func)
+					log.debug('args: %s' % command_copy)
+					command_copy.reverse()
+					retval =func(self,*command_copy) 
+					if retval == False:
+						self.reload() # resetting db
+						return
+					elif retval == True:
+						dosave = True
+						break # from while, not from for
+					else: # retval is None
+						break # from while, not from for
+			else:
+				log.error('COULD NOT PARSE: %s' % ' '.join(command))
+				log.error('COMMAND NOT FOUND, please type "help" to see a full list of commands available.' + "\n" + 'For help using a command type "help (then the command)"')
+				return self.reload()
+		else:
+			log.debug("success...")
+			if dosave:
+				self.save()
+				log.info("changes saved.")
+			#pprint(self.config)
+			return
+
+
+	def enterCli(self,opts,*first_commands):
+		self.current_wallet=opts.wallet_type
+
+		if first_commands:
+			self.interpretCliCommand(first_commands)
+		else:
+			lines = []
+			while True:
+				prompt = self.current_wallet or ''
+				try:
+					line = raw_input("%s>>> " % (prompt))
+				except KeyboardInterrupt, e:
+					raise PyTis.QuitNow()
+				else:
+					if not lines and cli_clean(line).lower() in ('quit','q'):
+						break
+					elif not lines and cli_clean(line).lower() in ('help','?','h'):
+						self.generateCliHelp()
+					elif not lines and cli_clean(line).lower() == 'use bitcoin':
+						log.debug("setting wallet type to bitcoin")
+						self.current_wallet = 'bitcoin'
+					elif not lines and cli_clean(line).lower() == 'use litecoin':
+						log.debug("setting wallet type to litecoin")
+						self.current_wallet = 'litecoin'
+					elif not lines and cli_clean(line).lower() == 'use zerocoin':
+						log.debug("setting wallet type to zerocoin")
+						self.current_wallet = 'zerocoin'
+					elif not lines and line.strip().lower().startswith('help'):
+						self.generateCliHelp(line.strip()[5:])
+					elif line in ("\n","\r","\r\n",""):
+						if lines:
+							self.interpretCliCommand(lines)
+							lines = []
+					else:
+						lines.append(line.split())
+
+	@bitcoin
+	@cli
+	def aquire_lock(self,*args):
+		if self.aquireLock():
+			print 'lock aquired'
+			return None
+		else:
+			print 'already locked'
+			return None
+
+	@bitcoin
+	@cli
+	def release_lock(self,*args):
+		locked = self.releaseLock()
+		print 'attempted relased lock, locked is: %s' % locked
+		return None
+
+	@bitcoin
+	@cli
+	def lock_state(self,*args):
+		print 'lock state is: %s' % self.config.get('locked',False)
+		return None
+
+	@bitcoin
+	@cli
+	def debug(self,*args):
+		pprint(self.config['wallets']['bitcoin'])
+		return None
+
+	@bitcoin
+	@cli
+	def reload_config(self,*args):
+		self.reload()
+		return None
+
+
+	@bitcoin
+	@cli
+	def remove_user(self,*args):
+		""" WILL REMOVE NEW USER FROM BITCOIN DB 
+	EXAMPLES:
+		REMOVE USER {username}
+		REMOVE USER {user} {name}
+	
+	* NOTE, if the --force flag is used, the user will not be prompted first, it
+	  will just delete the user without question.
+"""
+		global log
+		wallet = self.getWalletForUser('bitcoin',*args)
+		if not wallet:
+			return wallet
+		else:
+			username=wallet['username']
+			if self.opts.force or PyTis.getInputYN('Are you sure you wish to delete "%s" from the database?' % username, option_always=[]):
+				del self.config['wallets']['bitcoin']['users'][username]
+				del wallet
+				return True
+			else:
+				return False
+
+
+	@bitcoin
+	@cli
+	def add_user(self,*args):
+		""" WILL ADD NEW USER TO BITCOIN DB 
+	EXAMPLES:
+		ADD USER {username}
+		ADD USER {user} {name}
+		ADD USER {username} PASSWORD {password}
+		ADD USER {username} PASSWORD {pass} {word}
+		ADD USER {user} {name} PASSWORD {password}
+		ADD USER {user} {name} PASSWORD {pass} {word}
+"""
+		global log
+		if not args:
+			log.error("NO username provided.")
+			return False
+		if len(args) >= 3 and 'password' in args[1:]:
+			try:
+				password_grp = list(args[1:][args[1:].index('password')+1:len(args[1:])+1])
+			except ValueError,e:
+				password = None
+				username = ' '.join(list(args))
+			else:
+				password = ' '.join(list(password_grp))
+				username = ' '.join(list(args[0:(len(args)-len(password_grp)-1)]))
+		else:
+			username = ' '.join(list(args))
+			password = None
+
+		# silly error handling first
+		if not self.config.get('wallets'): self.config['wallets'] = {'bitcoin':{}, 'litecoin': {}, 'zerocoin': {}}
+		if not self.config['wallets'].get('bitcoin'): self.config['wallets']['bitcoin'] = {}
+		if not self.config['wallets']['bitcoin'].get('users'): self.config['wallets']['bitcoin']['users'] = {}
+		if username in self.config['wallets']['bitcoin']['users'].keys():
+			log.error('The user "%s" already exists.' % username)
+			return False
+		else:
+			if not password: password = ''
+			self.config['wallets']['bitcoin']['users'][username]={}
+			self.config['wallets']['bitcoin']['users'][username]['status']='active'
+			self.config['wallets']['bitcoin']['users'][username]['username']=username
+			self.config['wallets']['bitcoin']['users'][username]['password'] = password
+
+		return True
+
+
+	# UNCOMMENT OUT the method below to test the onInitCommandTest method, forcing
+	# an error.  This should be done before each release, to ensure the catching 
+	# of this error still functions properly.
+	#@bitcoin
+	#@cli
+	#def add(self,uname,passwd):
+	#	""" bitcoin add help
+	# (this method is for error testing)
+	#	"""
+	#	pass
+
+	@bitcoin
+	@cli
+	def add_address(self,*args):
+		""" WILL ADD NEW ADDRESS TO USER 
+	EXAMPLES:
+		ADD ADDRESS {username} {bitcoin address}
+		ADD ADDRESS {user} {name} {bitcoin address}
+"""
+		global log
+		if not args: log.error("No USERNAME provided.")
+		if len(args) < 2:
+			log.error("No ADDRESS provided.")
+			return False
+
+		username = ' '.join(list(args[0:len(args)-1]))
+		address = BTCaddress(args[len(args)-1])
+		
+		try:
+			wallet = self.config['wallets']['bitcoin']['users'][username]
+		except KeyError,e:
+			log.error(PyTis.tolen('This user "%s" does not exist, maybe you spelled the ' \
+			'name wrong?  Type LIST USERS to see a full list of bitcoin wallet ' \
+			'users; *Remember, USERnames are case sensative.' % username))
+			return False 
+		else:
+			if not wallet.get('addresses'):
+				wallet['addresses'] = {}
+			if address in wallet['addresses']:
+				log.error('The address "%s" already exists for the user "%s".' % (address,username))
+				return False
+			else:
+				if not wallet['addresses']:
+					wallet['addresses'][address]={'default':True}
+				else:
+					wallet['addresses'][address]={'default':False}
+			return True
+		pass
+
+	@bitcoin
+	@cli
+	def lock_user(self,*args):
+		""" WILL LOCK THE USER's ACCOUNT, IT WILL REMAIN LOCKED UNTIL THE "UNLOCK USER" IS
+USED.
+
+	EXAMPLES:
+		LOCK USER {username}
+		LOCK USER {user} {name}
+"""
+		global log
+		wallet = self.getWalletForUser('bitcoin',*args)
+		if not wallet:
+			return wallet
+		else:
+			wallet['status']='locked'
+			return True
+
+
+	@bitcoin
+	@cli
+	def unlock_user(self,*args):
+		""" WILL UNLOCK THE USER's ACCOUNT, IT WILL REMAIN LOCKED UNTIL THE "UNLOCK USER" 
+IS USED.
+
+	EXAMPLES:
+		UNLOCK USER {username}
+		UNLOCK USER {user} {name}
+"""
+		global log
+		wallet = self.getWalletForUser('bitcoin',*args)
+		if not wallet:
+			return wallet
+		else:
+			wallet['status']='active'
+			return True
+
+	@bitcoin
+	@litecoin
+	@cli
+	def list_users(self,*args):
+		""" SIMPLE COMMAND, REQUIRES NO INPUT.  WILL LIST ALL USERS FOR SELECTED WALLET.
+
+	EXAMPLES:
+		LIST USERS
+
+"""
+		try:
+			users = self.config['wallets'][self.current_wallet]['users']
+		except KeyError,e:
+			log.warn("No %s users to list." % self.current_wallet)
+			return None 
+		else:
+			if not users:
+				log.warn("No %s users to list." % self.current_wallet)
+				return None
+			else:
+				log.info("%s USERS:" % str(len(users)))
+				[log.info(u) for u in users]
+			return None 
+
+
+	def getWalletForUser(self,wallet_type,*args):
+		global log
+		if not args: log.error("NO username provided.")
+		username = ' '.join(list(args))
+		if not username.strip():
+			log.error("NO username provided")
+			return False
+
+		try:
+			wallet = self.config['wallets'][wallet_type]['users'][username]
+		except KeyError,e:
+			log.error(PyTis.tolen('This user "%s" does not exist, maybe you spelled the ' \
+			'name wrong?  Type LIST USERS to see a full list of %s wallet ' \
+			'users; *Remember, USERnames are case sensative.' % (username,wallet_type)))
+			return False 
+		else:
+			return wallet
+
+
+
+	@bitcoin
+	@cli
+	def show_user(self,*args):
+		""" WILL DISPLAY THE USER's ACCOUNT
+
+	EXAMPLES:
+		SHOW USER {username}
+		SHOW USER {user} {name}
+"""
+		global log
+		wallet = self.getWalletForUser('bitcoin',*args)
+		if not wallet:
+			return wallet
+		else:
+			username=wallet['username']
+
+			log.info("-- BEGIN USER REPORT")
+			log.info("USER:        %s" % username)
+			log.info("STATUS:      %s" % wallet.get('status'))
+			if wallet.get('password'):
+				log.info("PASSWORD:    %s" % (str('*'*len(wallet.get('password')))))
+			else:
+				log.info("PASSWORD:    N/A")
+#			log.info("ADDED:  %s" wallet.get('created'))
+			addrs = wallet.get('addresses',{})
+			log.info("ADDRESSES: %s" % str(len(addrs)))
+			for x in [BTCaddress(a) for a in addrs]:
+				log.info('%s - version: %s'% (x,x.version))
+			log.info("-- END OF REPORT")
+			return None
+
+
+	@bitcoin
+	@cli
+	def change_password(self,*args):
+		""" WILL ADD NEW, OR REPLACE EXISTING PASSWORD WITH NEW INPUT 
+	EXAMPLES:
+		CHANGE PASSWORD {username} {newpassword}
+		CHANGE PASSWORD {user} {name} {newpassword}
+		CHANGE PASSWORD {user} {name} PASSWORD {newpassword}
+"""
+		global __minimum_password_length__, log
+		if not args:
+			log.error("NO username provided.")
+			return False
+		if len(args) >= 3 and 'password' in args[1:]:
+			try:
+				password_grp = list(args[1:][args[1:].index('password')+1:len(args[1:])+1])
+			except ValueError,e:
+				username = ' '.join(list(args[0:len(args)-1]))
+				password = str(args[len(args)-1])
+			else:
+				password = ' '.join(list(password_grp))
+				username = ' '.join(list(args[0:(len(args)-len(password_grp)-1)]))
+		else:
+			username = ' '.join(list(args[0:len(args)-1]))
+			password = str(args[len(args)-1])
+
+		wallet = self.getWalletForUser('bitcoin',*username.split(' '))
+		if not wallet:
+			return False
+		else:
+			if not self.opts.force and len(password) < __minimum_password_length__:
+				log.error('The password provided is too short, minimum length is: %s.  To set an empty password you must use the "--force" flag.' % __minimum_password_length__)
+				return False
+			elif not self.opts.force and not password.strip():
+				log.error('No password provided.  To set an empty password you must use the "--force" flag.')
+				return False
+			else:
+				wallet['password']=password
+				return True
+
+
+	@bitcoin
+	@rpc
+	def add_address(self,uname,addr):
+		pass
+
+	@bitcoin
+	@rpc
+	def change_password(self,uname):
+		pass
+
+	@bitcoin
+	@rpc
+	def user_stats(self,uname):
+		pass
+
+	@litecoin
+	@cli
+	def add_user(self,uname,passwd):
+		""" litecoin add user help
+		"""
+		pass
+
+	def load(self):
+		'''	'''
+		# load to cstring from file
+		orig = self.opts.filename
+		encrypted_handle = open(orig,'r')
+		#encrypted_file = encrypted_handle.read(-1)
+		self.IT=encrypted_handle.read(1)
+		rest_file = cStringIO.StringIO()
+		encrypted_handle.seek(0)
+		rest_file.write(encrypted_handle.read(-1)[1:])
+		encrypted_handle.close()
+		del encrypted_handle
+		rest_file.seek(0)
+		passkey = encryptText(self.opts.username,self.opts.password)
+		aes_key = passkey[0:32]
+		aes_iv = passkey[32:48]
+		#password = str(passkey[48:128]).strip()
+		del passkey
+		AES.block_size = 32
+		stringo = cStringIO.StringIO()
+		# decrypt to cstring file
+		decrypt_file(rest_file, stringo, 1024, aes_key, aes_iv)
+		stringo.seek(0)
+		# push to config obj in memory, store as attribute
+		self.config = COBJ.ConfigObj(stringo)
+		rest_file.close()
+		del rest_file
+		stringo.close()
+		del stringo
+		del aes_key
+		del aes_iv
+		#del password
+
+
+	def reload(self):
+		self.load()
+
+	def _save(self):
+		global log
+		orig = self.opts.filename
+		back = self.opts.backup_filename
+		# First copy db.original to db.back (if this fails we still have db.original)
+		shutil.copy(orig,back)
+		# Read DB touch-time as my-touch-time-here
+		self.config['microtime'] = self.mytime
+
+		stringo = cStringIO.StringIO()
+		self.config.write(stringo)
+
+		passkey = encryptText(self.opts.username,self.opts.password)
+		aes_key = passkey[0:32]
+		aes_iv = passkey[32:48]
+		del passkey
+		
+		AES.block_size = 32
+		stringo.seek(0)
+
+		edb = open(orig,'wb')
+		edb.write(str(self.IT))
+		encrypt_file(stringo, edb, 1024, aes_key, aes_iv)
+		stringo.close()
+		edb.close()
+		del edb
+		del stringo
+		del aes_key
+		del aes_iv
+
+	def save(self):
+		"""btcdm post-run doc help
+	Task - Perform very safe encrypt and close. Pay attention to these steps, if
+	any fail, we are 100% safe because the way this is done leaves us a 100% 
+	gaurentee that the data is safe.	
+
+	*** EVEN IF THE SERVER HAS THE POWER CUT MID HARD DISK WRITE! """
+		#our_cobj['microtime'] = microtime()
+		global log
+		orig = self.opts.filename
+		back = self.opts.backup_filename
+		if not os.path.exists(os.path.abspath(orig)):
+			log.debug("No edb file found, first save!")
+			self.set_microtime()
+			stringo = cStringIO.StringIO()
+			cobj = COBJ.ConfigObj()
+			cobj['username'] = self.opts.username
+			cobj['microtime'] = self.mytime
+
+			passkey = encryptText(self.opts.username,self.opts.password)
+			aes_key = passkey[0:32]
+			aes_iv = passkey[32:48]
+			cobj['password'] = passkey[48:128]
+			del passkey
+
+			cobj.write(stringo)
+			AES.block_size = 32
+			edb = open(orig,'wb')
+			edb.write(str(self.IT))
+			stringo.seek(0)
+			encrypt_file(stringo,edb,1024,aes_key,aes_iv)
+			stringo.close()
+			edb.close()
+			del edb
+			del stringo
+			del aes_key
+			del aes_iv
+			return
+		else:
+			log.debug("Edb file exists, about to aquire a lock.")
+			self.aquireLock()
+			self._save()
+			# Re-Read and decrypt db.original, pull touch-time as touch-time-there
+			# load to cstring from file
+			self.reload()
+			if not self.config.get('microtime',None) or \
+				(str(self.mytime).strip() != str(self.config.get('microtime',None))):
+				error = 'An unknown error has occured, we have attempted to save to ' \
+				'the database, however the timestamps do not match.  A backup of ' \
+				'your encrypted database may be found at "%s"' % orig
+				log.error(error)
+				self.releaseLock()
+				raise Exception(error)
+			else:
+				os.unlink(back)
+				self.releaseLock()
+
+def post_run(opts,args):
+	""" btcdm post-run doc help
+Task - Perform very safe encrypt and close. Pay attention to these steps, if
+any fail, we are 100% safe because the way this is done leaves us a 100% 
+gaurentee that the data is safe.	
+
+*** EVEN IF THE SERVER HAS THE POWER CUT MID HARD DISK WRITE!
+
+First copy db.original to db.back (if this fails we still have db.original)
+Read DB touch-time as touch-time-here
+Re-Read and decrypt db.original, pull touch-time as touch-time-there
+IF	{1}
+	Touch-time-there is >= touch-time-here then we have a major conflict, this 
+	should NEVER EVER EVERY happen, but if it does, we need to know.	
+	Re-Encrypt the DB in memory to stored variable called ourversion.
+	Save ourversion to db.conflicted and close.
+		 (Please note the operating system will reflect time stamps on db.original 
+		 and db.conflicted, this will allow the admin to choose which one is right, 
+		 on next run, but really, this should never happen.	If it does we need to 
+		 report it to the software authors, to have it remedied.) Remove db.backup.
+ELSE:
+	Save ourversion as db.original (if this fails we still have db.backup)
+	Test db.backup,
+	IF it fails:
+		warn user, copy db.backup back to db.original, failure >wan&close,
+		success, remove db.backup and close
+	IF it passes
+		remove db.backup, failure > warn&close
+	
+Why Touch Time?
+	What if somehow, some way, two instances of this end up running.
+	And neither have a btcmd.edb set for this, so they both find the one and only
+	btcmd.edb in /etc/ now what?	This is why we make sure that the database that
+	we have in memory is newer than the one on disk.
+
+	"""
+	pass
+
+def main():
+	"""usage: btcdm"""
+	global log
+
+	helpishere=False
+	for a in sys.argv:
+		if a == '--help':
+			helpishere=True
+
+	current_filename, forgetme = locate_db(None)
+	if helpishere:
+		main.__doc__ = "%s\n\n	CONFIG FILE: %s\n\n%s\n" % (main.__doc__,
+			os.path.abspath(current_filename),first_setup.__doc__)
+
+	installation_type='0'
+	if current_filename and os.path.exists(current_filename):	
+		encrypted_handle = open(current_filename,'r')
+		installation_type=encrypted_handle.read(1)
+		encrypted_handle.close()
+		del encrypted_handle
+
+	errors=[]
+	PyTis.__option_always__ = [True]
+	help_dict = dict(version=__version__, author=__author__, created=__created__,
+						 copyright=__copyright__)
+
+	parser = PyTis.MyParser()
+
+	parser.extra_txt = "\n\n%s\n" % run.__doc__ + """
+
+examples:	
+	xxx
+
+SEE ALSO:
+	xxx
+
+COPYRIGHT:
+	%(copyright)s
+
+AUTHOR:
+	%(author)s
+
+HISTORY:
+	Original Author
+
+VERSION:
+	%(version)s
+""" % help_dict
+
+	parser.formatter.format_description = lambda s:s
+	if helpishere:
+		parser.set_description(__doc__)
+	parser.set_usage(main.__doc__)
+
+	runtime = optparse.OptionGroup(parser, "-- RUNTIME ARGUMENTS")
+	runtime.add_option("-a", "--action", type="choice", action='store',
+					 default=None, 
+					 dest='action',
+					 choices=['start','stop','restart','status'],
+					 metavar='[ACTION]', help="choices: <start,stop,restart,status>")
+
+	runtime.add_option("-c", "--cli", action='store_true',
+					 default=False, dest='cli',
+					 help="Run in command line mode.")
+
+	runtime.add_option("", "--force", action="store_true",
+					 default=False,
+					 help="This will force the program to attempt to run regardless of "
+								"timestamp errors.	This should ONLY be used expertly, to "
+								"resolve a timestamp conflict."
+							 "\n***Please remember this is a very DANGEROUS option!***")
+
+
+	runtime.add_option("-n", "--nice", type="int", action='store',
+					 default=PyTis.MyThread.default_niceness, 
+					 dest='niceness',
+					 metavar='[INT <-20 - 19>]', help="Nicenesses range from -20 (most favorable scheduling) to 19 (least favorable).	Default 10")
+
+	runtime.add_option("-w", "--wallet-type", type="choice", action='store',
+					 default=None, 
+					 dest='wallet_type',
+					 choices=['bitcoin','b','litecoin','l','zerocoin','z'],
+					 metavar='[Current Wallet Type]', help="choices: <bitcoin,litecoin,zerocoin>")
+
+	parser.add_option_group(runtime)
+	# -------------------------------------------------------------------------
+	# variable setting
+	vars = optparse.OptionGroup(parser, "-- CONFIGURATION SETTINGS")
+	
+	vars.add_option("-s", "--setup", action="store_true",
+										default=False, help="Setup bitcoind Mediator")
+
+	parser.add_option_group(vars)
+	# ----------------------------
+	bitd = optparse.OptionGroup(parser, "bitcoind Connection Arguments")
+
+	bitd.add_option("-H", "--host", action="store",
+					 default='localhost', metavar='[HOST]', dest='host',
+					 help="Sets the hostname if other than localhost.")
+
+	bitd.add_option("-P", "--port", action="store", type="int",
+					 default=18332, metavar='[INT]', dest='port',
+					 help="Use different port to connect to your bitcoind daemon.")
+
+	if installation_type in ('0','2'):
+		bitd.add_option("-p", "--password", action="store",
+						dest='password', metavar="[PASSWORD]",
+						help="Password for connecting to the bitcoind daemon."
+						 "If one is not provided via STDIN, user will be prompted.")
+	
+
+	bitd.add_option("-u", "--username", action="store",
+					 default='',metavar="[USER]", dest='username',
+					 help="User to connect as. If no user is provided current user will be used.")
+
+	parser.add_option_group(bitd)
+	# ----------------------------
+	dbgroup = optparse.OptionGroup(parser, "-- DEBUG")
+	dbgroup.add_option("-D", "--debug", action="store_true",
+					 default=False, dest='debug',
+					 help="Enable debugging")
+
+	if helpishere:
+		dbgroup.add_option("-V", "--verbose", action="store_true",
+						 default=True, dest='verbose',
+						 help="Be more Verbose (make lots of noise)")
+
+	if not helpishere:
+		dbgroup.add_option("-V", "--verbose", action="store_true",
+						 default=True, dest='verbose',
+						 help=optparse.SUPPRESS_HELP)
+
+
+	dbgroup.add_option("-q", "--quiet", action="store_true",
+					 default=False, dest='quiet',
+					 help="be vewwy quiet (I'm hunting wabbits)")
+
+	dbgroup.add_option("-v", "--version", action="store_true",
+					 default=False, dest='version',
+					 help="Display Version")
+
+	parser.add_option_group(dbgroup)
+	# ----------------------------
+
+	(opts, args) = parser.parse_args()
+	if opts.wallet_type=='b': opts.wallet_type='bitcoin'
+	if opts.wallet_type=='l': opts.wallet_type='litecoin'
+	if opts.wallet_type=='z': opts.wallet_type='zerocoin'
+	if opts.quiet: opts.verbose = False
+
+	if opts.action is None and len(args) and args[0] in ('start','stop','restart','status'):
+		opts.action = args[0]
+		del args[0]
+
+	old_version = opts.version
+	opts.version = True
+	log = PyTis.set_logging(opts, os.path.basename(sys.argv[0]))
+	opts.version = old_version
+
+	if opts.version:
+		return PyTis.version(__version__)
+
+	try:
+		edb = pre_run(opts,args,installation_type)
+		run(opts,args,edb)
+	except PyTis.QuitNow, e:
+		if str(e):
+			log.info('')
+			log.warn("\n%s" % str(e))
+		log.info("\nbye!")
+		sys.exit(0)
+	return
+
+
+	if opts.action and len(args) == 1 and args[0] in 'start stop restart status'.split() and opts.action != args[0]:
+		errors.append("Silly human, you provided an action via a flag (%s) and an option on STDIN (%s) and they are different.	Please only provide one action." % (opts.action, args[0]))
+
+	if len(args) == 1 and args[0] in 'start stop restart status'.split() and opts.action is None:
+		opts.action = args[0]
+		del args[0]
+
+	if len(args) == 0 and not opts.action and not errors:
+		print 'a'
+		return parser.print_usage()
+	elif not errors:
+		print 'b'
+		try:
+			y = PyTis.MyThread()
+			y.setLogFile(log)
+			y.setOpts(opts)
+			y.register(run,opts,args)
+			print "Running: %s" % y.IsRunning()
+			y.service(opts)
+			return
+		except KeyboardInterrupt,e:
+			log.debug("Keyboard-Interrupt, bye!")
+			if not opts.quiet:
+				log.info("\nbye!")
+			return
+		else:
+			print 'c'
+			log.info("Done.")
+			return
+	else:
+		print 'd'
+		parser.print_usage()
+		if errors:
+			print 'e'
+			log.error(str("\n".join(errors)))
+		return parser.print_help(errors)
+
+	parser.print_help("ERROR: Unknown, but invalid input.")
+	sys.exit(0)
+
+if __name__ == '__main__':
+	main()
+
+
