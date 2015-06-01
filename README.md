@@ -1,3 +1,6 @@
+Please note, I had to backburner this for a few months.  I will (I must) finish this.  Our startup company depends on it.  To whoever sent me the micro payment donation, thank you.  Any little bit will help.  It is now June 3rd.  I think I will be back working on this around August 1st.  From there it should only take a few more weeks then I'll be done.  
+----- Thank you above.
+
 
 For more information about this project, please view: https://github.com/PyTis/btcdm/wiki
 
