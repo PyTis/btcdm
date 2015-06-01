@@ -4,7 +4,7 @@ PyTis LLC. v2.0 Public License
 The PyTis Public License Version 2 consists of the Mozilla Public License Version 1.1, modified to be specific to PyTis, with the Additional Terms in Exhibit A and Exhibit B. The original Mozilla Public License 1.1 can be found at: http://www.mozilla.org/MPL/MPL-1.1.html
 
 PyTis PUBLIC LICENSE
-Version 1.0
+Version 2.0
 
 1. Definitions.
 
