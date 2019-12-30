@@ -18,15 +18,15 @@ Below are 3 images describing not one, but two major security holes I found in b
 
 After you see the 3 images that explain the problem (1st 2 show the 2 security holes, the 3rd shows my proposed solution), you can see a 4th image that explains how the solution program will run.
 
-[![bitcoind Problem 1 overview](https://raw2.github.com/PyTis/btcdm/master/BitcoinD_Issue-a.png)](https://raw2.github.com/PyTis/btcdm/master/BitcoinD_Issue-a.png)
+[![bitcoind Problem 1 overview](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-a.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-a.png)
 
-[![bitcoind Problem 2 overview](https://raw2.github.com/PyTis/btcdm/master/BitcoinD_Issue-b.png)](https://raw2.github.com/PyTis/btcdm/master/BitcoinD_Issue-b.png)
-
-
-[![Overview to proposed solution for bitcoind daemon, a mediator] (https://raw2.github.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)](https://raw2.github.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)
+[![bitcoind Problem 2 overview](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-b.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-b.png)
 
 
-[![bitcoind daemon mediator high level overview](https://raw2.github.com/PyTis/btcdm/master/BitcoinDm.png)](https://raw2.github.com/PyTis/btcdm/master/BitcoinDm.png)
+[![Overview to proposed solution for bitcoind daemon, a mediator] (https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)
+
+
+[![bitcoind daemon mediator high level overview](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinDm.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinDm.png)
 
 My modified MPL known as our PyTis License can be summarized.  Don't copy and alter my software without leaving my name in the credits.  If you want to use it, go for it.  If you want to take it and run with it, changing it, adapting it, whatever, I don't care.  I just want to still be reconized as the original author, because I am.
 
