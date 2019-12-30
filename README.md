@@ -23,7 +23,7 @@ After you see the 3 images that explain the problem (1st 2 show the 2 security h
 [![bitcoind Problem 2 overview](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-b.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-b.png)
 
 
-[![Overview to proposed solution for bitcoind daemon, a mediator] (https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)
+[![Overview to proposed solution for bitcoind daemon, a mediator](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinD_Issue-c.png)
 
 
 [![bitcoind daemon mediator high level overview](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinDm.png)](https://raw.githubusercontent.com/PyTis/btcdm/master/BitcoinDm.png)
